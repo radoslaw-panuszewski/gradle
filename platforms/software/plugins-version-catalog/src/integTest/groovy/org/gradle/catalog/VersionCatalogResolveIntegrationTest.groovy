@@ -19,7 +19,7 @@ package org.gradle.catalog
 
 import org.gradle.integtests.fixtures.AbstractHttpDependencyResolutionTest
 import org.gradle.test.fixtures.file.TestFile
-
+import org.gradle.test.fixtures.server.http.MavenHttpRepository
 
 class VersionCatalogResolveIntegrationTest extends AbstractHttpDependencyResolutionTest implements VersionCatalogSupport {
     def setup() {
@@ -268,6 +268,55 @@ org.gradle.test:my-platform:1.0=incomingCatalogForLibs0
         expectPlatformContents 'composed-platform'
     }
 
+    def "can --write-locks skip caching"() {
+        given:
+        // we can't use mavenRepo as in other tests since it's a local repo which doesn't use persistent cache
+        def repo = mavenHttpRepo('repo')
+        repo.module('com.company', 'some-lib', '5.2.0').allowAll().publish()
+        repo.module('com.company', 'some-lib', '5.2.8').allowAll().publish()
+
+        and:
+        settingsFile << """
+            dependencyResolutionManagement {
+                repositories {
+                    maven { url "${repo.uri}" }
+                }
+
+                versionCatalogs {
+                    libs {
+                        from("org.gradle.test:my-platform:[1.0,2.0)")
+                    }
+                }
+            }
+        """
+
+        and:
+        buildFile << """
+            dependencies {
+                implementation(libs.some.lib)
+            }
+        """
+
+        and:
+        preparePublishedPlatformArtifact(repo, '1.0', '5.2.0')
+
+        when:
+        run ':checkDeps'
+
+        then:
+        outputContains 'Resolved: some-lib-5.2.0.jar'
+
+        and:
+        preparePublishedPlatformArtifact(repo, '1.1', '5.2.8')
+
+        when:
+        run 'dependencies', '--write-locks' /*, '--refresh-dependencies' */
+        run ':checkDeps'
+
+        then:
+        outputContains 'Resolved: some-lib-5.2.8.jar'
+    }
+
     private TestFile preparePlatformProject(String platformSpec = "", String version = "1.0") {
         def platformDir = file('platform')
         platformDir.file("settings.gradle").text = """
@@ -303,5 +352,23 @@ org.gradle.test:my-platform:1.0=incomingCatalogForLibs0
         """
 
         return platformDir
+    }
+
+    private void preparePublishedPlatformArtifact(MavenHttpRepository repo, String platformVersion, String libraryVersion) {
+        def module = repo
+            .module("org.gradle.test", "my-platform", platformVersion)
+            .variant('versionCatalogElements', [
+                'org.gradle.category': 'platform',
+                'org.gradle.usage': 'version-catalog'
+            ])
+            .hasType("toml")
+            .withModuleMetadata()
+            .allowAll()
+        module.rootMetaData.allowGetOrHead()
+        module.publish()
+        module.artifact.file.text = """
+            [libraries]
+            some-lib = {group = "com.company", name = "some-lib", version = "$libraryVersion" }
+        """
     }
 }
